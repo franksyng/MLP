@@ -68,6 +68,8 @@ class DataProvider:
         e.g. ['Frank', 'is', 'a', 'handsome', 'guy']
              ['LABEL', 'O', 'O', 'LABEL', 'O']
              where 'O' indicates no label, and LABEL in real cases are feature_num
+        Training set be like:
+        train = [([words], [labels]), ([words], [labels])...]
         """
         train_data = self.sort_annotation()
         df_pn = pd.read_csv(self.pn_data, index_col=False)
