@@ -3,6 +3,47 @@ import os
 import re
 
 
+def read_label(path):
+    feature = os.path.join(path, 'features.csv')
+    df_feature = pd.read_csv(feature, index_col=False)
+    df_feature = df_feature.set_index('feature_num')
+    df_feature['feature_num'] = df_feature.index
+    labels = df_feature.to_dict()['feature_num']
+    labels['CLS'] = 97
+    labels['SEP'] = 98
+    labels['PAD'] = 99
+    return labels
+
+
+def split_chunks(sentence, chunk_num):
+    output = []
+    for i in range(0, len(sentence), chunk_num):
+        output.append(sentence[i:i + chunk_num])
+    return output
+
+
+def obtain_mini_patch(train_data, VOCAB, length):
+    output = []
+    for note in train_data:
+        sentence = note[0]
+        label = note[1]
+        sentence = split_chunks(sentence, length)
+        label = split_chunks(label, length)
+        for i in range(len(sentence)):
+            curr_sentence = sentence[i]
+            curr_label = label[i]
+            curr_sentence = ['CLS'] + curr_sentence
+            curr_label = [VOCAB['CLS']] + curr_label
+            curr_len = len(curr_sentence) - 1
+            while curr_len < length:
+                curr_sentence.append('PAD')
+                curr_label.append(VOCAB['PAD'])
+            curr_sentence.append('SEP')
+            curr_label.append(VOCAB['SEP'])
+            output.append((curr_sentence, curr_label))
+    return output
+
+
 class DataProvider:
     def __init__(self, path):
         self.train_data = os.path.join(path, 'train.csv')
@@ -116,3 +157,8 @@ class DataProvider:
             dataset.append((train, labels))
         return dataset
 
+path = 'data'
+provider = DataProvider(path)
+train = provider.loader()
+tag_to_idx = read_label(path)
+train_data = obtain_mini_patch(train, tag_to_idx, 10)
