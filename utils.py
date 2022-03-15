@@ -9,9 +9,10 @@ def read_label(path):
     df_feature = df_feature.set_index('feature_num')
     df_feature['feature_num'] = df_feature.index
     labels = df_feature.to_dict()['feature_num']
-    labels['CLS'] = 97
-    labels['SEP'] = 98
-    labels['PAD'] = 99
+    labels['O'] = 96
+    labels['[CLS]'] = 97
+    labels['[SEP]'] = 98
+    labels['[PAD]'] = 99
     return labels
 
 
@@ -38,6 +39,7 @@ def obtain_mini_patch(train_data, VOCAB, length):
             while curr_len < length:
                 curr_sentence.append('PAD')
                 curr_label.append(VOCAB['PAD'])
+                curr_len += 1
             curr_sentence.append('SEP')
             curr_label.append(VOCAB['SEP'])
             output.append((curr_sentence, curr_label))
@@ -140,10 +142,10 @@ class DataProvider:
                     for each in mid.split(' ')[::-1]:
                         if len(each) != 0:
                             train.append(each)
-                            labels.append(loc[1])
+                            labels.append(entity)
                 else:
                     train.append(mid)
-                    labels.append(loc[1])
+                    labels.append(entity)
                 pn = left
             if len(pn) != 0:
                 if ' ' in pn:
