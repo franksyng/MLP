@@ -2,61 +2,55 @@ import pandas as pd
 import os
 import re
 
+import torch
+from transformers import *
+import transformers
+import torch.nn as nn
+import sentencepiece
 
-def read_label(path):
-    feature = os.path.join(path, 'features.csv')
-    df_feature = pd.read_csv(feature, index_col=False)
-    df_feature = df_feature.set_index('feature_num')
-    df_feature['feature_num'] = df_feature.index
-    labels = df_feature.to_dict()['feature_num']
-    labels['O'] = 96
-    labels['[CLS]'] = 97
-    labels['[SEP]'] = 98
-    labels['[PAD]'] = 99
-    return labels
-
-
-def split_chunks(sentence, chunk_num):
-    output = []
-    for i in range(0, len(sentence), chunk_num):
-        output.append(sentence[i:i + chunk_num])
-    return output
-
-
-def obtain_mini_patch(train_data, VOCAB, length):
-    output = []
-    for note in train_data:
-        sentence = note[0]
-        label = note[1]
-        sentence = split_chunks(sentence, length)
-        label = split_chunks(label, length)
-        for i in range(len(sentence)):
-            curr_sentence = sentence[i]
-            curr_label = label[i]
-            curr_sentence = ['CLS'] + curr_sentence
-            curr_label = [VOCAB['CLS']] + curr_label
-            curr_len = len(curr_sentence) - 1
-            while curr_len < length:
-                curr_sentence.append('PAD')
-                curr_label.append(VOCAB['PAD'])
-                curr_len += 1
-            curr_sentence.append('SEP')
-            curr_label.append(VOCAB['SEP'])
-            output.append((curr_sentence, curr_label))
-    return output
+# def split_chunks(sentence, chunk_num):
+#     output = []
+#     for i in range(0, len(sentence), chunk_num):
+#         output.append(sentence[i:i + chunk_num])
+#     return output
+#
+#
+# def obtain_mini_patch(train_data, VOCAB, length):
+#     output = []
+#     for note in train_data:
+#         sentence = note[0]
+#         label = note[1]
+#         sentence = split_chunks(sentence, length)
+#         label = split_chunks(label, length)
+#         for i in range(len(sentence)):
+#             curr_sentence = sentence[i]
+#             curr_label = label[i]
+#             curr_sentence = ['[CLS]'] + curr_sentence
+#             curr_label = [VOCAB['[CLS]']] + curr_label
+#             curr_len = len(curr_sentence) - 1
+#             while curr_len < length:
+#                 curr_sentence.append('[PAD]')
+#                 curr_label.append(VOCAB['[PAD]'])
+#                 curr_len += 1
+#             curr_sentence.append('[SEP]')
+#             curr_label.append(VOCAB['[SEP]'])
+#             output.append((curr_sentence, curr_label))
+#     return output
 
 
-class DataProvider:
-    def __init__(self, path):
-        self.train_data = os.path.join(path, 'train.csv')
-        self.pn_data = os.path.join(path, 'patient_notes.csv')
+class Preprocessor:
+
+    def __init__(self, data_path, pn_path, feature_path):
+        self.data = data_path
+        self.pn_data = pn_path
+        self.feature_data = feature_path
 
     def preprocess_data(self):
         """
         Remove unnecessary chars and setup link between index and labels for each location annotation
         Annotation here could be a single list [], or multi-dimension list [[], [], []]
         """
-        df_train = pd.read_csv(self.train_data, index_col=False)  # Load data
+        df_train = pd.read_csv(self.data, index_col=False)  # Load data
         df_train = df_train[['pn_num', 'feature_num', 'location']]
         rule = re.compile('[\d\s;,]')  # Exclude not needed chars
         df_train = df_train[df_train.location != '[]']  # Exclude empty data
@@ -142,10 +136,10 @@ class DataProvider:
                     for each in mid.split(' ')[::-1]:
                         if len(each) != 0:
                             train.append(each)
-                            labels.append(entity)
+                            labels.append(str(entity))
                 else:
                     train.append(mid)
-                    labels.append(entity)
+                    labels.append(str(entity))
                 pn = left
             if len(pn) != 0:
                 if ' ' in pn:
@@ -156,11 +150,95 @@ class DataProvider:
 
             train = train[::-1]
             labels = labels[::-1]
+            for i in range(len(labels)):
+                if labels[i] == 'O':
+                    continue
+                elif i == 0:
+                    labels[i] = 'B-' + str(labels[i])
+                else:
+                    former_tag = labels[i - 1].split('-')
+                    if len(former_tag) == 1:
+                        former_tag = former_tag[0]
+                    else:
+                        former_tag = former_tag[1]
+                    if labels[i] == former_tag:
+                        labels[i] = 'I-' + str(labels[i])
+                    else:
+                        labels[i] = 'B-' + str(labels[i])
+
             dataset.append((train, labels))
         return dataset
 
-path = 'data'
-provider = DataProvider(path)
-train = provider.loader()
-tag_to_idx = read_label(path)
-train_data = obtain_mini_patch(train, tag_to_idx, 10)
+    def to_dataframe(self):
+        data_with_tag = self.loader()
+        dataset = []
+        counter = 0
+        for note in data_with_tag:
+            for i in range(len(note[0])):
+                curr_row = [counter, note[0][i], note[1][i]]
+                dataset.append(curr_row)
+            counter += 1
+        dataset = pd.DataFrame(dataset, columns=['sentence_idx', 'word', 'tag'])
+        return dataset
+
+    def read_label(self):
+        df_feature = pd.read_csv(self.feature_data, index_col=False)
+        df_feature['idx'] = df_feature.index
+        df_feature = df_feature.set_index('feature_num')
+        labels = df_feature.to_dict()['idx']
+        idx = 0
+        vocab = {}
+        for label in labels:
+            b_tag = 'B-' + str(labels[label])
+            i_tag = 'I-' + str(labels[label])
+            vocab[idx] = b_tag
+            vocab[idx + 1] = i_tag
+            idx += 2
+        vocab['O'] = 286
+        vocab['[CLS]'] = 287
+        vocab['[SEP]'] = 288
+        vocab['[PAD]'] = 289
+        return vocab
+
+    def tag_to_idx(self, label, vocab):
+        for i in range(len(label)):
+            label[i] = vocab[label[i]]
+        return label
+
+    # def make_dataset(self):
+    #     ready_data = self.loader()
+    #     tokenized = []
+    #     tokenizer = AutoTokenizer.from_pretrained('jsylee/scibert_scivocab_uncased-finetuned-ner')
+    #     start = tokenizer('[CLS]', add_special_tokens=False, return_tensors='pt')['input_ids'][0]
+    #     end = tokenizer('[SEP]', add_special_tokens=False, return_tensors='pt')['input_ids'][0]
+    #     vocab = self.read_label()
+    #     for each_set in ready_data:
+    #         curr_sentence = torch.empty(0)
+    #         curr_label = []
+    #         sentence = each_set[0]
+    #         label = each_set[1]
+    #         for i in range(len(sentence)):
+    #             wordpiece = tokenizer(sentence[i], add_special_tokens=False, return_tensors='pt')['input_ids'][0]
+    #             curr_sentence = torch.cat((curr_sentence, wordpiece), dim=0)
+    #             if len(wordpiece) == 1:
+    #                 curr_label += [label[i]]
+    #             else:
+    #                 curr_label += [label[i]] * len(wordpiece)
+    #         curr_sentence = torch.cat((start, curr_sentence), dim=0)
+    #         curr_sentence = torch.cat((curr_sentence, end), dim=0)
+    #         curr_sentence = curr_sentence.type(torch.int64)
+    #         curr_label.insert(0, '[CLS]')
+    #         curr_label.append('[SEP]')
+    #         curr_label = self.tag_to_idx(curr_label, vocab)
+    #         tokenized.append((curr_sentence, curr_label))
+    #     return tokenized
+    # def make_dataset(self):
+    #     ready_data = self.loader()
+    #     vocab = self.read_label()
+
+# data_path = 'data/train.csv'
+# pn_path = 'data/patient_notes.csv'
+# feature_path = 'data/features.csv'
+# preprocessor = Preprocessor(data_path, pn_path, feature_path)
+# # dataset = preprocessor.to_dataframe()
+# print(len(preprocessor.read_label()))
