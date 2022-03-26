@@ -2,14 +2,25 @@ import argparse
 import os
 import utils
 from model import *
-import random
 import torch.nn as nn
 import torch.nn.functional
 from transformers import AutoTokenizer
+# from seqeval.metrics import f1_score
 import numpy as np
 from sys import stdout
-import warnings
-warnings.filterwarnings('ignore')
+from sklearn.metrics import classification_report
+
+
+def cal_accuracy(preds, label_ids, mask):
+    valid_len = np.sum(mask)
+    flat_preds = preds.to('cpu').numpy().flatten()[:valid_len]
+    flat_labels = label_ids.flatten()[:valid_len]
+    acc = classification_report(flat_labels, flat_preds, output_dict=True)['accuracy']
+    new_labels = [i for i in flat_labels if i != 286]
+    new_labels = list(dict.fromkeys(new_labels))
+    target_names = [str(i) for i in new_labels]
+    ner_f1 = classification_report(flat_labels, flat_preds, labels=new_labels, target_names=target_names, output_dict=True)['f1-score']
+    return acc, ner_f1
 
 
 def validation(model, testing_loader, model_name='LSTM_CLS', batch_size=None):
@@ -36,7 +47,7 @@ def validation(model, testing_loader, model_name='LSTM_CLS', batch_size=None):
             preds = torch.argmax(preds, dim=2)
             label_ids = targets.to('cpu').numpy()
             true_labels.append(label_ids)
-            accuracy, ner_accuracy = utils.cal_accuracy(preds, label_ids, mask.to('cpu').numpy())
+            accuracy, ner_accuracy = cal_accuracy(preds, label_ids, mask.to('cpu').numpy())
             eval_loss += loss.mean().item()
             eval_accuracy += accuracy
             eval_ner_acc += ner_accuracy
@@ -59,8 +70,8 @@ def train(epoch_num, batch_size, model_name='LSTM_CLS'):
         model.train()
         cumulative_loss = []
         curr_avg_loss = 0
-        for i, data in enumerate(train_loader, 0):
-            iter_total = len(train_loader)
+        for i, data in enumerate(training_loader, 0):
+            iter_total = len(training_loader)
             ids = data['ids'].to(dev, dtype=torch.long)
             mask = data['mask'].to(dev, dtype=torch.long)
             targets = data['tags'].to(dev, dtype=torch.long)  # [32, 200]
@@ -89,7 +100,7 @@ def train(epoch_num, batch_size, model_name='LSTM_CLS'):
             torch.save(model, os.path.join(root, "checkpoint/best_model.pt"))
         stdout.write(f'Epoch {epoch} finished - avg. loss: {curr_avg_loss}, best epoch: {best_epoch}, best loss: {best_avg_loss}\n')
         stdout.flush()
-        validation(model, val_loader, model_name, batch_size)
+        validation(model, testing_loader, model_name, int(batch_size/2))
         # xm.optimizer_step(optimizer)
         # xm.mark_step()
 
@@ -102,7 +113,8 @@ if __name__ == "__main__":
     parser.add_argument('--epoch', default=30)
     parser.add_argument('--batch_size', default=1)
     parser.add_argument('--max_len', default=250)
-    parser.add_argument('--lr', default=0.0001)
+    parser.add_argument('--lr', default=0.001)
+
     args = parser.parse_args()
 
     root = ''
@@ -116,72 +128,62 @@ if __name__ == "__main__":
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # dev = xm.xla_device()
 
-    # ========= Make dataset trainable ========== #
-    getter_sentences = getter.sentences
-
-    # random.shuffle(getter_sentences)
+    # ========= Tag to idx ========== #
     tag2idx = preprocessor.make_vocab()
-    sentences, labels = utils.sentence_and_label(getter_sentences, tag2idx)
-    label_stat = utils.count_label(labels)
-    max_num = label_stat[143]
+    sentences = [' '.join([s[0] for s in sent]) for sent in getter.sentences]
+    # sentences = [s[0] for sent in getter.sentences for s in sent]
+    # print(sentences)
+    labels = [[s[1] for s in sent] for sent in getter.sentences]
+    labels = [[tag2idx.get(l) for l in lab] for lab in labels]
 
-    # ========= Split dataset ========== #
-    train_percent = 0.8
-    val_percent = 0.2
-    test_percent = 1 - train_percent - val_percent
-
-    test_data = None
-    test_labels = None
-    if train_percent + val_percent == 1:
-        train_split, val_split = utils.split_dataset(sentences, labels, train_percent, val_percent)
-    else:
-        test_size = int(test_percent * len(sentences))
-        train_split, val_split, test_split = utils.split_dataset(sentences, labels, train_percent, val_percent, test_percent)
-        test_data = test_split[0]
-        test_labels = test_split[1]
-
-    train_data = train_split[0]
-    train_labels = train_split[1]
-    val_data = val_split[0]
-    val_labels = val_split[1]
-
-    stdout.write("Full Dataset: {}\n".format(len(sentences)))
-    stdout.write("Train Dataset: {}\n".format(len(train_data)))
-    stdout.write("Validation Dataset: {}\n".format(len(val_data)))
-    if test_data is not None:
-        stdout.write("Test Dataset: {}\n".format(len(test_data)))
-    stdout.flush()
-
-    # ========= Form tokenized dataset ========== #
+    # ========= Training variables ========== #
+    MAX_LEN = 250
+    TRAIN_BATCH_SIZE = 32
+    VALID_BATCH_SIZE = 16
+    EPOCHS = 30
+    LEARNING_RATE = 0.001
+    # tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
+    # tokenizer = AutoTokenizer.from_pretrained('allenai/scibert_scivocab_uncased')
+    # tokenizer = AutoTokenizer.from_pretrained('transformersbook/bert-base-uncased-finetuned-clinc')
     tokenizer = AutoTokenizer.from_pretrained('emilyalsentzer/Bio_ClinicalBERT')
-    train_set = CustomDataset(tokenizer, train_data, train_labels, args.max_len)
-    val_set = CustomDataset(tokenizer, val_data, val_labels, args.max_len)
 
-    # ========= Data loader ========== #
-    train_params = {'batch_size': args.batch_size,
+    # ========= Creating the dataset and dataloader for the neural network ========== #
+    train_percent = 0.8
+    train_size = int(train_percent * len(sentences))
+    # train_dataset=df.sample(frac=train_size,random_state=200).reset_index(drop=True)
+    # test_dataset=df.drop(train_dataset.index).reset_index(drop=True)
+    train_sentences = sentences[0:train_size]
+    # print(train_sentences)
+    train_labels = labels[0:train_size]
+
+    test_sentences = sentences[train_size:]
+    test_labels = labels[train_size:]
+
+    print("FULL Dataset: {}".format(len(sentences)))
+    print("TRAIN Dataset: {}".format(len(train_sentences)))
+    print("TEST Dataset: {}".format(len(test_sentences)))
+
+    training_set = CustomDataset(tokenizer, train_sentences, train_labels, MAX_LEN)
+    testing_set = CustomDataset(tokenizer, test_sentences, test_labels, MAX_LEN)
+
+    # ========= Parameters ========== #
+    train_params = {'batch_size': TRAIN_BATCH_SIZE,
                     'shuffle': True,
                     'num_workers': 0
                     }
 
-    val_params = {'batch_size': args.batch_size,
-                  'shuffle': True,
-                  'num_workers': 0
-                  }
-
-    test_params = {'batch_size': args.batch_size,
+    test_params = {'batch_size': VALID_BATCH_SIZE,
                    'shuffle': True,
                    'num_workers': 0
                    }
 
-    train_loader = DataLoader(train_set, **train_params)
-    val_loader = DataLoader(val_set, **val_params)
+    training_loader = DataLoader(training_set, **train_params)
+    testing_loader = DataLoader(training_set, **test_params)
 
     # ========= Char embedding ========== #
-    embeds = utils.char_embedding(train_loader)
+    embeds = utils.char_embedding(training_loader)
 
-    # ========= NN dependencies ========== #
-    class_weights = torch.FloatTensor([label_stat[i] if i in label_stat.keys() else 0 for i in range(287)]).to(dev)
-    # criterion = nn.CrossEntropyLoss(weight=class_weights)
+    # optimizer = torch.optim.Adam(params=model.parameters(), lr=LEARNING_RATE)
     criterion = nn.CrossEntropyLoss()
 
     if args.mode == 'train':
@@ -195,13 +197,11 @@ if __name__ == "__main__":
             model = None
         model.to(dev)
         # optimizer = torch.optim.SGD(params=model.parameters(), lr=LEARNING_RATE, momentum=0.9, weight_decay=0.9)
-        optimizer = torch.optim.AdamW(params=model.parameters(), lr=args.lr)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, args.batch_size)
-        train(int(args.epoch), args.batch_size, args.model)
-
-
-
-
-
-
-
+        optimizer = torch.optim.AdamW(params=model.parameters(), lr=LEARNING_RATE)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, EPOCHS)
+        train(EPOCHS, TRAIN_BATCH_SIZE, args.model)
+    elif args.mode == 'test':
+        model_path = args.ckpt
+        # model = torch.load(model_path, map_location=torch.device('cpu'))
+        model = torch.load(model_path)
+        validation(model, testing_loader)

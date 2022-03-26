@@ -7,35 +7,109 @@ from transformers import *
 import transformers
 import torch.nn as nn
 import sentencepiece
+import numpy as np
+from sklearn.metrics import classification_report
 
-# def split_chunks(sentence, chunk_num):
-#     output = []
-#     for i in range(0, len(sentence), chunk_num):
-#         output.append(sentence[i:i + chunk_num])
-#     return output
-#
-#
-# def obtain_mini_patch(train_data, VOCAB, length):
-#     output = []
-#     for note in train_data:
-#         sentence = note[0]
-#         label = note[1]
-#         sentence = split_chunks(sentence, length)
-#         label = split_chunks(label, length)
-#         for i in range(len(sentence)):
-#             curr_sentence = sentence[i]
-#             curr_label = label[i]
-#             curr_sentence = ['[CLS]'] + curr_sentence
-#             curr_label = [VOCAB['[CLS]']] + curr_label
-#             curr_len = len(curr_sentence) - 1
-#             while curr_len < length:
-#                 curr_sentence.append('[PAD]')
-#                 curr_label.append(VOCAB['[PAD]'])
-#                 curr_len += 1
-#             curr_sentence.append('[SEP]')
-#             curr_label.append(VOCAB['[SEP]'])
-#             output.append((curr_sentence, curr_label))
-#     return output
+
+def cal_accuracy(preds, label_ids, mask):
+    valid_len = np.sum(mask)
+    flat_preds = preds.to('cpu').numpy().flatten()[:valid_len]
+    flat_labels = label_ids.flatten()[:valid_len]
+    acc = classification_report(flat_labels, flat_preds, output_dict=True)['accuracy']
+    new_labels = [i for i in flat_labels if i != 286]
+    new_labels = list(dict.fromkeys(new_labels))
+    target_names = [str(i) for i in new_labels]
+    ner_f1 = classification_report(flat_labels, flat_preds, labels=new_labels, target_names=target_names, output_dict=True)
+    return acc, ner_f1['macro avg']['f1-score']
+
+
+def char_embedding(data_loader):
+    tkn_list = []
+    for _, data in enumerate(data_loader, 0):
+        tkn_result = data['tkn_result']
+        para_list = []
+        for para in tkn_result:
+            for word in para:
+                para_list.append(char_to_idx(word))
+        tkn_list.append(para_list)
+    return tkn_list
+
+
+def char_to_idx(word):
+    pad = [0] * 10
+    if word == '[CLS]' or word == '[SEP]' or word == '[PAD]':
+        return pad
+    else:
+        vocab = char_vocab()
+        chars = [vocab[char] for char in word]
+        chars.extend(pad)
+        return chars[:10]
+
+
+def char_vocab():
+    vocab = {}
+    counter = 1
+    for i in range(91, 127):
+        vocab[chr(i)] = counter
+        counter += 1
+    for j in range(31, 65):
+        vocab[chr(j)] = counter
+        counter += 1
+    return vocab
+
+
+def count_label(labels):
+    stat = {}
+    for para in labels:
+        for word_idx in para:
+            if word_idx in stat.keys():
+                stat[word_idx] += 1
+            else:
+                stat[word_idx] = 1
+    return stat
+
+
+def split_dataset(sentences, labels, train_percent, val_percent, test=None):
+    sentences = [''.join([s[0] for s in sent]) for sent in sentences]
+    # print(sentences)
+    train_size = int(int(train_percent * len(sentences)) / 10)
+    print('sssss', train_size)
+    val_size = int(int(val_percent * len(sentences)) / 10)
+    print('aaaaa', val_size)
+    train_sentence = []
+    train_label = []
+    val_sentence = []
+    val_label = []
+    patient_case_idx = 100
+    while True:
+        if patient_case_idx > len(sentences):
+            break
+        if patient_case_idx == 100:
+            sen_case = sentences[0:patient_case_idx]
+            train_sentence.extend(sen_case[0:train_size])
+            val_sentence.extend(sen_case[train_size:])
+            lab_case = labels[0:patient_case_idx]
+            train_label.extend(lab_case[0:train_size])
+            val_label.extend(lab_case[train_size:])
+            patient_case_idx += 100
+        else:
+            sen_case = sentences[patient_case_idx - 100:patient_case_idx]
+            train_sentence.extend(sen_case[0:train_size])
+            val_sentence.extend(sen_case[train_size:])
+            lab_case = labels[patient_case_idx - 100:patient_case_idx]
+            train_label.extend(lab_case[0:train_size])
+            val_label.extend(lab_case[train_size:])
+            patient_case_idx += 100
+
+    return (train_sentence, train_label), (val_sentence, val_label)
+
+
+def sentence_and_label(getter_sentences, tag2dix):
+    tag2idx = tag2dix
+    sentences = [' '.join([s[0] for s in sent]) for sent in getter_sentences]
+    labels = [[s[1] for s in sent] for sent in getter_sentences]
+    labels = [[tag2idx.get(l) for l in lab] for lab in labels]
+    return sentences, labels
 
 
 class Preprocessor:
@@ -112,7 +186,7 @@ class Preprocessor:
         df_pn = pd.read_csv(self.pn_data, index_col=False)
         df_pn = df_pn.set_index('pn_num')
         pn_data = df_pn.to_dict()
-        rule = re.compile('[\n\r\t,()\"\'.]')
+        rule = re.compile('[\n\r\t,()\"\'.\-:;/]')
         dataset = []
         for key in train_data:
             train = []
@@ -150,21 +224,21 @@ class Preprocessor:
 
             train = train[::-1]
             labels = labels[::-1]
-            for i in range(len(labels)):
-                if labels[i] == 'O':
-                    continue
-                elif i == 0:
-                    labels[i] = 'B-' + str(labels[i])
-                else:
-                    former_tag = labels[i - 1].split('-')
-                    if len(former_tag) == 1:
-                        former_tag = former_tag[0]
-                    else:
-                        former_tag = former_tag[1]
-                    if labels[i] == former_tag:
-                        labels[i] = 'I-' + str(labels[i])
-                    else:
-                        labels[i] = 'B-' + str(labels[i])
+            # for i in range(len(labels)):
+            #     if labels[i] == 'O':
+            #         continue
+            #     elif i == 0:
+            #         labels[i] = 'B-' + str(labels[i])
+            #     else:
+            #         former_tag = labels[i - 1].split('-')
+            #         if len(former_tag) == 1:
+            #             former_tag = former_tag[0]
+            #         else:
+            #             former_tag = former_tag[1]
+            #         if labels[i] == former_tag:
+            #             labels[i] = 'I-' + str(labels[i])
+            #         else:
+            #             labels[i] = 'B-' + str(labels[i])
 
             dataset.append((train, labels))
         return dataset
@@ -181,7 +255,7 @@ class Preprocessor:
         dataset = pd.DataFrame(dataset, columns=['sentence_idx', 'word', 'tag'])
         return dataset
 
-    def read_label(self):
+    def make_vocab_iob(self):
         df_feature = pd.read_csv(self.feature_data, index_col=False)
         df_feature['idx'] = df_feature.index
         df_feature = df_feature.set_index('feature_num')
@@ -189,56 +263,31 @@ class Preprocessor:
         idx = 0
         vocab = {}
         for label in labels:
-            b_tag = 'B-' + str(labels[label])
-            i_tag = 'I-' + str(labels[label])
-            vocab[idx] = b_tag
-            vocab[idx + 1] = i_tag
+            b_tag = 'B-' + str(label)
+            i_tag = 'I-' + str(label)
+            vocab[b_tag] = idx
+            vocab[i_tag] = idx + 1
             idx += 2
         vocab['O'] = 286
-        vocab['[CLS]'] = 287
-        vocab['[SEP]'] = 288
-        vocab['[PAD]'] = 289
         return vocab
 
-    def tag_to_idx(self, label, vocab):
-        for i in range(len(label)):
-            label[i] = vocab[label[i]]
-        return label
+    def make_vocab(self):
+        df_feature = pd.read_csv(self.feature_data, index_col=False)
+        df_feature['idx'] = df_feature.index
+        df_feature = df_feature.set_index('feature_num')
+        labels = df_feature.to_dict()['idx']
+        idx = 0
+        vocab = {}
+        for label in labels:
+            vocab[str(label)] = idx
+            idx += 1
+        vocab['O'] = 143
+        return vocab
 
-    # def make_dataset(self):
-    #     ready_data = self.loader()
-    #     tokenized = []
-    #     tokenizer = AutoTokenizer.from_pretrained('jsylee/scibert_scivocab_uncased-finetuned-ner')
-    #     start = tokenizer('[CLS]', add_special_tokens=False, return_tensors='pt')['input_ids'][0]
-    #     end = tokenizer('[SEP]', add_special_tokens=False, return_tensors='pt')['input_ids'][0]
-    #     vocab = self.read_label()
-    #     for each_set in ready_data:
-    #         curr_sentence = torch.empty(0)
-    #         curr_label = []
-    #         sentence = each_set[0]
-    #         label = each_set[1]
-    #         for i in range(len(sentence)):
-    #             wordpiece = tokenizer(sentence[i], add_special_tokens=False, return_tensors='pt')['input_ids'][0]
-    #             curr_sentence = torch.cat((curr_sentence, wordpiece), dim=0)
-    #             if len(wordpiece) == 1:
-    #                 curr_label += [label[i]]
-    #             else:
-    #                 curr_label += [label[i]] * len(wordpiece)
-    #         curr_sentence = torch.cat((start, curr_sentence), dim=0)
-    #         curr_sentence = torch.cat((curr_sentence, end), dim=0)
-    #         curr_sentence = curr_sentence.type(torch.int64)
-    #         curr_label.insert(0, '[CLS]')
-    #         curr_label.append('[SEP]')
-    #         curr_label = self.tag_to_idx(curr_label, vocab)
-    #         tokenized.append((curr_sentence, curr_label))
-    #     return tokenized
-    # def make_dataset(self):
-    #     ready_data = self.loader()
-    #     vocab = self.read_label()
 
 # data_path = 'data/train.csv'
 # pn_path = 'data/patient_notes.csv'
 # feature_path = 'data/features.csv'
 # preprocessor = Preprocessor(data_path, pn_path, feature_path)
-# # dataset = preprocessor.to_dataframe()
-# print(len(preprocessor.read_label()))
+# dataset = preprocessor.to_dataframe()
+# print(preprocessor.make_vocab())

@@ -1,9 +1,7 @@
 import os
 import utils
-import torch
 from model import *
-import torch.nn as nn
-from transformers import BertTokenizer, AutoTokenizer
+from transformers import BertTokenizer
 
 
 def train(epoch_num):

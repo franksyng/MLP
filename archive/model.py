@@ -1,3 +1,4 @@
+import tokenizers.decoders
 from torch.utils.data import Dataset, DataLoader, RandomSampler, SequentialSampler
 import torch.nn as nn
 import torch
@@ -67,7 +68,7 @@ class BERT(nn.Module):
         self.layer = AutoModel.from_pretrained('emilyalsentzer/Bio_ClinicalBERT').eval()
         # self.layer = AutoModel.from_pretrained('transformersbook/bert-base-uncased-finetuned-clinc', num_labels=278)
         # self.layer = AutoModel.from_pretrained('allenai/scibert_scivocab_uncased')
-        self.fc = nn.Linear(768, 144)
+        self.fc = nn.Linear(768, 287)
         self.relu = nn.ReLU()
         self.dropout = torch.nn.Dropout(0.3)
 
@@ -84,11 +85,11 @@ class BERT_LSTM_CNN(nn.Module):
     def __init__(self, hdim=768):
         super(BERT_LSTM_CNN, self).__init__()
         self.dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.feature_num = 144
+        self.feature_num = 287
         self.bert = AutoModel.from_pretrained('emilyalsentzer/Bio_ClinicalBERT').eval()
         self.lstm = nn.LSTM(768, hdim, batch_first=True)
         self.conv = nn.Sequential(
-            nn.Conv1d(hdim, 144, 3, padding=1),
+            nn.Conv1d(hdim, 287, 3, padding=1),
             nn.ReLU(),
         )
         # self.maxpool = nn.MaxPool1d(kernel_size=3)
